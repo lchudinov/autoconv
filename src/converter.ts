@@ -18,8 +18,15 @@ let debug = false;
 let badCharLimit = 10;
 
 interface ScanResult {
-  type: FileType;
+  encoding: Encoding;
   data: Buffer;
+}
+
+enum CharClass {
+  Unprintable = 0,
+  CarriageControl = 1,
+  AsciiPrintable = 2,
+  NonAsciiPrintable = 3,
 }
 
 export async function checkFile(path: string): Promise<void> {
@@ -39,73 +46,69 @@ export async function checkFile(path: string): Promise<void> {
 }
 
 async function convertFileIfNeeded(file: string): Promise<void> {
-  const { type, data } = await detectEncoding(file);
+  const { encoding: type, data } = await detectEncoding(file);
   if (type === 'IBM-1047') {
     await convertFile(file, data);
     console.log(`File ${file} converted to ISO-8558-1`);
   }
 }
 
-type FileType = 'ERROR' | 'EMPTY' | 'BOTH' | 'ISO8859-1' | 'IBM-1047' | 'NEITHER';
+type Encoding = 'ERROR' | 'EMPTY' | 'BOTH' | 'ISO8859-1' | 'IBM-1047' | 'NEITHER';
 
 async function detectEncoding(filename: string): Promise<ScanResult> {
   let debugCount = 0;
-  let bad_char_count = 0;
   let showedFilename = false;
   const data = await fs.readFile(filename);
-  clearCounts();
-  let pos = 0;
-  for (pos = 0; pos < data.length; pos++) {
+  const iso8859Counts = [0, 0, 0, 0];
+  const ibm1047Counts = [0, 0, 0, 0];
+  for (let pos = 0; pos < data.length; pos++) {
     const ch = data[pos];
     const iso8859Class = classify(ch);
-    counts[0][iso8859Class]++;
-    if (debugCharError && iso8859Class == 0 && counts[0][iso8859Class] < 10 && debugCount++ < debugLimit) {
+    iso8859Counts[iso8859Class]++;
+    if (debugCharError && iso8859Class == 0 && iso8859Counts[iso8859Class] < 10 && debugCount++ < debugLimit) {
       if (!showedFilename) {
         console.log('%s', filename);
         showedFilename = true;
       }
       console.log('ISO8859-1 char error at position=%d, char=0x%s', pos, ch.toString(16));
     }
-    const ch_trans = IBM1047_to_ISO8859_1[ch];
-    let ibm1047Class = classify(ch_trans);
-    counts[1][ibm1047Class]++;
-    if (debugCharError && ibm1047Class == 0 && counts[1][ibm1047Class] < 10 && debugCount++ < debugLimit) {
+    const convertedCh = IBM1047_to_ISO8859_1[ch];
+    const ibm1047Class = classify(convertedCh);
+    ibm1047Counts[ibm1047Class]++;
+    if (debugCharError && ibm1047Class == 0 && ibm1047Counts[ibm1047Class] < 10 && debugCount++ < debugLimit) {
       if (!showedFilename) {
         console.log('%s', filename);
         showedFilename = true;
       }
       console.log('IBM-1047 char error at position=%d, char=0x%s', pos, ch.toString(16));
     }
-    pos++;
   }
   if (debug) {
-    showCounts();
+    showCounts(iso8859Counts, 'ISO-8558-1');
+    showCounts(ibm1047Counts, 'IBM-1047');
   }
-  if (0 == (counts[0][0] + counts[0][1] + counts[0][2] + counts[0][3])) {
-    return { type: 'EMPTY', data };
-  } else if (counts[0][0] <= badCharLimit && counts[1][0] <= badCharLimit) {
-    if ((counts[0][0] == 0 && counts[0][3] == 0) && !((counts[1][0] == 0 && counts[1][3] == 0))) {
-      return { type: 'ISO8859-1', data };
-    } else if (!(counts[0][0] == 0 && counts[0][3] == 0) && ((counts[1][0] == 0 && counts[1][3] == 0))) {
-      return { type: 'IBM-1047', data };
-    } else if (counts[0][3] <= badCharLimit && counts[1][3] <= badCharLimit) {
-      return { type: 'BOTH', data };
-    } else if (counts[0][3] <= badCharLimit) {
-      return { type: 'ISO8859-1', data };
-
-    } else if (counts[1][3] <= badCharLimit) {
-      return { type: 'IBM-1047', data };
+  if (0 == (iso8859Counts[CharClass.Unprintable] + iso8859Counts[CharClass.CarriageControl] + iso8859Counts[CharClass.AsciiPrintable] + iso8859Counts[CharClass.NonAsciiPrintable])) {
+    return { encoding: 'EMPTY', data };
+  } else if (iso8859Counts[CharClass.Unprintable] <= badCharLimit && ibm1047Counts[CharClass.Unprintable] <= badCharLimit) {
+    if ((iso8859Counts[CharClass.Unprintable] == 0 && iso8859Counts[CharClass.NonAsciiPrintable] == 0) && !((ibm1047Counts[CharClass.Unprintable] == 0 && ibm1047Counts[CharClass.NonAsciiPrintable] == 0))) {
+      return { encoding: 'ISO8859-1', data };
+    } else if (!(iso8859Counts[CharClass.Unprintable] == 0 && iso8859Counts[CharClass.NonAsciiPrintable] == 0) && ((ibm1047Counts[CharClass.Unprintable] == 0 && ibm1047Counts[CharClass.NonAsciiPrintable] == 0))) {
+      return { encoding: 'IBM-1047', data };
+    } else if (iso8859Counts[CharClass.NonAsciiPrintable] <= badCharLimit && ibm1047Counts[CharClass.NonAsciiPrintable] <= badCharLimit) {
+      return { encoding: 'BOTH', data };
+    } else if (iso8859Counts[CharClass.NonAsciiPrintable] <= badCharLimit) {
+      return { encoding: 'ISO8859-1', data };
+    } else if (ibm1047Counts[CharClass.NonAsciiPrintable] <= badCharLimit) {
+      return { encoding: 'IBM-1047', data };
     } else {
-      return { type: 'BOTH', data };
+      return { encoding: 'BOTH', data };
     }
-  } else if (counts[0][0] <= badCharLimit) {
-    bad_char_count = counts[0][0];
-    return { type: 'ISO8859-1', data };
-  } else if (counts[1][0] <= badCharLimit) {
-    bad_char_count = counts[0][0];
-    return { type: 'IBM-1047', data };
+  } else if (iso8859Counts[CharClass.Unprintable] <= badCharLimit) {
+    return { encoding: 'ISO8859-1', data };
+  } else if (ibm1047Counts[CharClass.Unprintable] <= badCharLimit) {
+    return { encoding: 'IBM-1047', data };
   } else {
-    return { type: 'NEITHER', data };
+    return { encoding: 'NEITHER', data };
   }
 }
 
@@ -114,25 +117,24 @@ async function detectEncoding(filename: string): Promise<ScanResult> {
 /* 0x0020-0x007F: ASCII printable */
 /* 0x00A0: unprintable */
 /* 0x00A1-0x00FF: non-ASCII printable */
-function classify(ch: number): number {
-  return (ch == 0x09 || ch == 0x0A || ch == 0x0B || ch == 0x0C || ch == 0x0D || ch == 20 || ch == 0x85) ? 1 : (ch <= 0x1F || ch == 0xA0) ? 0 : (ch <= 0x7F) ? 2 : 3
+function classify(ch: number): CharClass {
+  if (ch == 0x09 || ch == 0x0A || ch == 0x0B || ch == 0x0C || ch == 0x0D || ch == 20 || ch == 0x85) {
+    return CharClass.CarriageControl;
+  }
+  if (ch <= 0x1F || ch == 0xA0) {
+    return CharClass.Unprintable;
+  }
+  if (ch <= 0x7F) {
+    return CharClass.AsciiPrintable;
+  }
+  return CharClass.NonAsciiPrintable;
 }
 
-let counts: number[][];
-
-function clearCounts(): void {
-  counts = [];
-  for (let i = 0; i < 2; i++) {
-    counts[i] = new Array(4);
-    counts[i].fill(0);
-  }
-}
-
-function showCounts(): void {
-  for (let e = 0; e < 2; e++) {
-    console.log('  %s: bad=%d whitespace=%d english=%d international=%d', (e == 0) ? 'ISO8559-1' : 'IBM-1047',
-      counts[e][0], counts[e][1], counts[e][2], counts[e][3]);
-  }
+function showCounts(counts: number[], encoding: string): void {
+  console.log('  %s: bad=%d whitespace=%d english=%d international=%d', encoding,
+    counts[CharClass.Unprintable], counts[CharClass.CarriageControl],
+    counts[CharClass.AsciiPrintable], counts[CharClass.NonAsciiPrintable]
+  );
 }
 
 async function convertFile(path: string, data: Buffer): Promise<void> {
